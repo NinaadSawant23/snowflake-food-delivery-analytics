@@ -1,274 +1,165 @@
-# Import python packages
 import streamlit as st
 import pandas as pd
 import altair as alt
 from snowflake.snowpark.context import get_active_session
 
-# App Title
-st.title("Revenue Dashboard")
+st.set_page_config(page_title="📊 Business KPI Dashboard", layout="wide")
+st.title("📊 Food Delivery KPI Dashboard")
 
-# Get the current credentials
 session = get_active_session()
 
-def format_revenue(revenue):
-    #return f"₹{revenue / 1_000_000:.1f}M"
-    return f"₹{revenue:.1f}"
+def run_query(query):
+    return pd.DataFrame(session.sql(query).collect())
 
-# Function to alternate row colors
-def highlight_rows(row):
-    color = '#f2f2f2' if row.name % 2 == 0 else 'white'  # Alternate rows
-    return ['background-color: {}'.format(color)] * len(row)
+# Utility
+def format_inr(value): return f"₹{value:,.0f}"
 
-# Function to fetch KPI data from Snowflake
-def fetch_kpi_data():
-    query = """
-    SELECT 
-        year,
-        total_revenue,
-        total_orders,
-        avg_revenue_per_order,
-        avg_revenue_per_item,
-        max_order_value
-    FROM sandbox.consumption_sch.vw_yearly_revenue_kpis
-    ORDER BY year;
-    """
-    return session.sql(query).collect()
+# 1. Yearly Revenue KPIs
+yearly_df = run_query("""
+    SELECT * FROM consumption_sch.vw_yearly_revenue_kpis ORDER BY year;
+""")
 
-#TO_CHAR(TO_DATE(month::text, 'MM'), 'Mon') AS month_abbr,  -- Converts month number to abbreviated month name
-def fetch_monthly_kpi_data(year):
-    query = f"""
-    SELECT 
-        month::number(2) as month,
-        total_revenue::NUMBER(10) AS TOTAL_REVENUE
-    FROM 
-    sandbox.consumption_sch.vw_monthly_revenue_kpis
-    WHERE year = {year}
-    ORDER BY month;
-    """
-    return session.sql(query).collect()
+years = yearly_df["YEAR"].unique()
+default_year = max(years)
+selected_year = st.selectbox("📅 Select Year", sorted(years), index=list(years).index(default_year))
+selected_data = yearly_df[yearly_df["YEAR"] == selected_year]
 
-
-def fetch_unique_months(year):
-    query = f"""
-    SELECT 
-        DISTINCT MONTH FROM 
-    sandbox.consumption_sch.vw_monthly_revenue_by_restaurant 
-    WHERE YEAR = {year} 
-    ORDER BY MONTH;
-    """
-    return session.sql(query).collect()
-    
-def fetch_top_restaurants(year, month):
-    query = f"""
-    SELECT
-        restaurant_name,
-        total_revenue,
-        total_orders,
-        avg_revenue_per_order,
-        avg_revenue_per_item,
-        max_order_value
-    FROM
-        sandbox.consumption_sch.vw_monthly_revenue_by_restaurant
-    WHERE
-        YEAR = {year}
-        AND MONTH = {month}
-    ORDER BY
-        total_revenue DESC
-    LIMIT 10;
-    """
-    return session.sql(query).collect()
-    
-# Function to convert Snowpark DataFrame to Pandas DataFrame
-def snowpark_to_pandas(snowpark_df):
-    return pd.DataFrame(
-        snowpark_df,
-        columns=[
-            'Restaurant Name',
-            'Total Revenue (₹)',
-            'Total Orders',
-            'Avg Revenue per Order (₹)',
-            'Avg Revenue per Item (₹)',
-            'Max Order Value (₹)'
-        ]
-    )
-# Fetch data
-sf_df = fetch_kpi_data()
-df = pd.DataFrame(
-    sf_df,
-    columns=['YEAR','TOTAL_REVENUE','TOTAL_ORDERS','AVG_REVENUE_PER_ORDER','AVG_REVENUE_PER_ITEM','MAX_ORDER_VALUE']
-)
-
-# Aggregate Metrics for All Years
-#st.subheader("Aggregate KPIs: Overall Performance")
+# Top-level KPIs
 col1, col2, col3 = st.columns(3)
-
 with col1:
-    st.metric("Total Revenue (All Years)", format_revenue(df['TOTAL_REVENUE'].sum()))
+    st.metric("Total Revenue", format_inr(selected_data["TOTAL_REVENUE"].iloc[0]))
 with col2:
-    st.metric("Total Orders (All Years)", f"{df['TOTAL_ORDERS'].sum():,}")
+    st.metric("Total Orders", f"{selected_data['TOTAL_ORDERS'].iloc[0]:,}")
 with col3:
-    st.metric("Max Order Value (Overall)", f"₹{df['MAX_ORDER_VALUE'].max():,.0f}")
+    st.metric("Avg Revenue/Order", format_inr(selected_data["AVG_REVENUE_PER_ORDER"].iloc[0]))
 
 st.divider()
 
-# Year Selection Box
-years = df["YEAR"].unique()
-default_year = max(years)  # Select the most recent year by default
-selected_year = st.selectbox("Select Year", sorted(years), index=list(years).index(default_year))
+# 2. Monthly Revenue Trend
+monthly_df = run_query(f"""
+    SELECT month, total_revenue FROM consumption_sch.vw_monthly_revenue_kpis 
+    WHERE year = {selected_year} ORDER BY month;
+""")
+month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+monthly_df["Month"] = monthly_df["MONTH"].apply(lambda x: month_names[x-1])
 
-# Filter data for selected year
-year_data = df[df["YEAR"] == selected_year]
-total_revenue = year_data["TOTAL_REVENUE"].iloc[0]
-total_orders = year_data["TOTAL_ORDERS"].iloc[0]
-avg_revenue_per_order = year_data["AVG_REVENUE_PER_ORDER"].iloc[0]
-avg_revenue_per_item = year_data["AVG_REVENUE_PER_ITEM"].iloc[0]
-max_order_value = year_data["MAX_ORDER_VALUE"].iloc[0]
+bar = alt.Chart(monthly_df).mark_bar(color="#FF6B35").encode(
+    x=alt.X('Month', sort=month_names),
+    y=alt.Y('TOTAL_REVENUE', title="Revenue (₹)"),
+    tooltip=["Month", "TOTAL_REVENUE"]
+).properties(width=700, height=300)
 
-# Get previous year data
-previous_year = selected_year - 1
-previous_year_data = df[df["YEAR"] == previous_year]
+line = alt.Chart(monthly_df).mark_line(color="#FFA07A", point=True).encode(
+    x='Month', y='TOTAL_REVENUE'
+)
 
-# If previous year data exists, calculate differences
-if not previous_year_data.empty:
-    prev_total_revenue = previous_year_data["TOTAL_REVENUE"].iloc[0]
-    prev_total_orders = previous_year_data["TOTAL_ORDERS"].iloc[0]
-    prev_avg_revenue_per_order = previous_year_data["AVG_REVENUE_PER_ORDER"].iloc[0]
-    prev_avg_revenue_per_item = previous_year_data["AVG_REVENUE_PER_ITEM"].iloc[0]
-    prev_max_order_value = previous_year_data["MAX_ORDER_VALUE"].iloc[0]
-
-    # Calculate differences
-    revenue_diff = total_revenue - prev_total_revenue
-    orders_diff = total_orders - prev_total_orders
-    avg_rev_order_diff = avg_revenue_per_order - prev_avg_revenue_per_order
-    avg_rev_item_diff = avg_revenue_per_item - prev_avg_revenue_per_item
-    max_order_diff = max_order_value - prev_max_order_value
-else:
-    # If previous year data is not found, set differences to None or zero
-    revenue_diff = orders_diff = avg_rev_order_diff = avg_rev_item_diff = max_order_diff = None
-
-
-# Display Metrics for Selected Year with Comparison to Previous Year
-# st.subheader(f"KPI Scorecard for {selected_year}")
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.metric(
-        "Total Revenue", 
-        format_revenue(total_revenue), 
-        delta=f"₹{revenue_diff:.1f}" if revenue_diff is not None else None
-    )
-    st.metric("Total Orders", f"{total_orders:,}", delta=f"{orders_diff:,}" if orders_diff is not None else None)
-
-    #st.metric("Total Revenue", f"₹{total_revenue:,.0f}", delta=f"₹{revenue_diff:,.0f}" if revenue_diff is not None else None)
-    #st.metric("Total Orders", f"{total_orders:,}", delta=f"{orders_diff:,}" if orders_diff is not None else None)
-
-with col2:
-    st.metric("Avg Revenue per Order", f"₹{avg_revenue_per_order:,.0f}", delta=f"₹{avg_rev_order_diff:,.0f}" if avg_rev_order_diff is not None else None)
-    st.metric("Avg Revenue per Item", f"₹{avg_revenue_per_item:,.0f}", delta=f"₹{avg_rev_item_diff:,.0f}" if avg_rev_item_diff is not None else None)
-
-with col3:
-    st.metric("Max Order Value", f"₹{max_order_value:,.0f}", delta=f"₹{max_order_diff:,.0f}" if max_order_diff is not None else None)
-
-
+st.subheader("📈 Monthly Revenue Trend")
+st.altair_chart(bar + line, use_container_width=True)
 
 st.divider()
-# -----------------------------------------
 
+# 3. Tabs for KPI Exploration
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🏆 Restaurants",
+    "👥 Customers",
+    "🍽️ Menu & Cuisine",
+    "📍 Locations",
+    "📦 Operational Metrics"
+])
 
-# Fetch and prepare data
-month_sf_df = fetch_monthly_kpi_data(selected_year)
-month_df = pd.DataFrame(
-    month_sf_df,
-    columns=['Month', 'Total Monthly Revenue']
-)
+# === 4. Restaurants Tab ===
+with tab1:
+    months_df = run_query(f"""
+        SELECT DISTINCT month FROM consumption_sch.vw_monthly_revenue_by_restaurant 
+        WHERE year = {selected_year} ORDER BY month
+    """)
+    selected_month = st.selectbox("Select Month", sorted(months_df["MONTH"].tolist()), index=len(months_df)-1)
 
-# Map numeric months to abbreviated month names
-month_mapping = {
-    1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr',
-    5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug',
-    9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
-}
-month_df['Month'] = month_df['Month'].map(month_mapping)
+    rest_df = run_query(f"""
+        SELECT restaurant_name, total_revenue, total_orders, avg_revenue_per_order 
+        FROM consumption_sch.vw_monthly_revenue_by_restaurant 
+        WHERE year = {selected_year} AND month = {selected_month}
+        ORDER BY total_revenue DESC LIMIT 10;
+    """)
+    st.subheader(f"🏅 Top 10 Restaurants for {month_names[selected_month-1]} {selected_year}")
+    st.dataframe(rest_df.style.format({
+        "total_revenue": "₹{:,.0f}",
+        "avg_revenue_per_order": "₹{:,.0f}"
+    }), use_container_width=True)
 
-# Ensure months are in the correct chronological order
-month_df['Month'] = pd.Categorical(
-    month_df['Month'],
-    categories=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
-    ordered=True
-)
-month_df = month_df.sort_values('Month')  # Sort by chronological month order
+# === 5. Customers Tab ===
+with tab2:
+    col1, col2 = st.columns(2)
 
-# Convert revenue to millions
-month_df['Total Monthly Revenue'] = month_df['Total Monthly Revenue'] 
+    repeat_df = run_query("SELECT * FROM consumption_sch.vw_repeat_customer_rate")
+    clv_df = run_query("SELECT * FROM consumption_sch.vw_avg_customer_lifetime_value")
 
-# Plot Monthly Revenue Trend using Bar Chart
-st.subheader(f"{selected_year} - Monthly Revenue Trend")
-# Create the Altair Bar Chart with Custom Color
-bar_chart = alt.Chart(month_df).mark_bar(color="#ff5200").encode(
-    x=alt.X('Month', sort='ascending', title='Month'),
-    y=alt.Y('Total Monthly Revenue', title='Revenue (₹)')
-).properties(
-    width=700,
-    height=400
-)
+    with col1:
+        st.metric("Repeat Customer Rate", f"{repeat_df['REPEAT_CUSTOMER_RATE'].iloc[0]*100:.1f}%")
+    with col2:
+        st.metric("Avg Customer Lifetime Value", format_inr(clv_df['AVG_CUSTOMER_LIFETIME_VALUE'].iloc[0]))
 
-# Display the chart in Streamlit
-st.altair_chart(bar_chart, use_container_width=True)
+    st.subheader("👑 Top Customers by Revenue")
+    top_cust_df = run_query("SELECT * FROM consumption_sch.vw_top_customers_by_revenue")
+    st.dataframe(top_cust_df.style.format({
+        "total_spent": "₹{:,.0f}"
+    }), use_container_width=True)
 
-# Add a Trending Chart using Altair
-st.subheader(f"{selected_year} - Monthly Revenue Trend")
+    new_ret_df = run_query("SELECT * FROM consumption_sch.vw_customer_type_summary")
+    st.subheader("📊 New vs Returning Customers by Year")
+    st.bar_chart(new_ret_df.set_index("YEAR"))
 
-trend_chart = alt.Chart(month_df).mark_line(color="#ff5200", point=alt.OverlayMarkDef(color="#ff5200")).encode(
-    x=alt.X('Month', sort='ascending', title='Month'),
-    y=alt.Y('Total Monthly Revenue', title='Revenue (₹)', scale=alt.Scale(domain=[0, month_df['Total Monthly Revenue'].max()])),
-    tooltip=[
-        alt.Tooltip('Month', title='Month'),
-        alt.Tooltip('Total Monthly Revenue', title='Revenue (₹M)', format='.2f')  # Format to 2 decimal places
-    ]
-).properties(
-    width=700,
-    height=400
-).configure_point(
-    size=60
-)
+# === 6. Menu Tab ===
+with tab3:
+    top_menu_df = run_query("SELECT * FROM consumption_sch.vw_top_menu_items")
+    st.subheader("🍔 Top Menu Items by Quantity Sold")
+    st.dataframe(top_menu_df.style.format({
+        "total_revenue_generated": "₹{:,.0f}"
+    }), use_container_width=True)
 
-st.altair_chart(trend_chart, use_container_width=True)
+    cuisine_df = run_query("SELECT * FROM consumption_sch.vw_revenue_by_cuisine")
+    st.subheader("🍱 Revenue by Cuisine Type")
+    st.bar_chart(cuisine_df.set_index("CUISINE_TYPE"))
 
-# Month Selection based on the selected year
-if selected_year:
+    itemtype_df = run_query("SELECT * FROM consumption_sch.vw_revenue_by_item_type")
+    st.subheader("🍗 Revenue by Item Type")
+    st.bar_chart(itemtype_df.set_index("ITEM_TYPE"))
 
-    #get the unique months
-    month_sf_df = fetch_unique_months(selected_year)
-    print(month_sf_df)
-    #convert into df
-    month_df = pd.DataFrame(
-        month_sf_df,
-        columns=['MONTH']
-    )
-    print(month_df)
+    cat_df = run_query("SELECT * FROM consumption_sch.vw_revenue_by_menu_category")
+    st.subheader("📂 Revenue by Menu Category")
+    st.bar_chart(cat_df.set_index("CATEGORY"))
 
-    # Year Selection Box
-    months = month_df["MONTH"].unique()
-    default_month = max(months)  # Select the most recent year by default
-    selected_month = st.selectbox(f"Select Month For {selected_year}", sorted(months), index=list(months).index(default_month))
+# === 7. Location Tab ===
+with tab4:
+    loc_df = run_query("SELECT * FROM consumption_sch.vw_revenue_by_locality")
+    st.subheader("📍 Revenue by Locality")
+    st.bar_chart(loc_df.set_index("LOCALITY"))
 
-    # Fetch and Display Data
-    if selected_month:
-        st.subheader(f"Top 10 Restaurants for {selected_month}/{selected_year}")
-        top_restaurants = fetch_top_restaurants(selected_year, selected_month)
-        if top_restaurants:
-            top_restaurants_df = snowpark_to_pandas(top_restaurants)
-            # Remove index from DataFrame by resetting it and dropping the index column
-            #top_restaurants_df_reset = top_restaurants_df.reset_index(drop=True)
+    city_df = run_query("SELECT * FROM consumption_sch.vw_top_restaurant_locations")
+    st.subheader("🏙️ Top Cities by Restaurant Revenue")
+    st.bar_chart(city_df.set_index("LOCATION_CITY"))
 
-            # Display the DataFrame without index
-            #st.dataframe(top_restaurants_df_reset)
-            #st.dataframe(top_restaurants_df)
+# === 8. Ops Tab ===
+with tab5:
+    dow_df = run_query("SELECT * FROM consumption_sch.vw_revenue_by_weekday")
+    st.subheader("📆 Revenue by Day of Week")
+    st.bar_chart(dow_df.set_index("DAY_NAME"))
 
-            # Apply the alternate color style
-            styled_df = top_restaurants_df.style.apply(highlight_rows, axis=1)
+    peak_day_df = run_query("SELECT * FROM consumption_sch.vw_peak_order_day")
+    st.metric("📈 Peak Order Day", peak_day_df["DAY_NAME"].iloc[0])
 
-            # Display the styled DataFrame
-            st.dataframe(styled_df, hide_index= True)
-        else:
-            st.warning("No data found for the selected year and month.")
+    loss_df = run_query("SELECT * FROM consumption_sch.vw_lost_revenue_cancelled")
+    st.metric("💸 Lost Revenue from Cancelled Orders", format_inr(loss_df["LOST_REVENUE"].iloc[0]))
+
+    gender_df = run_query("SELECT * FROM consumption_sch.vw_orders_by_gender")
+    st.subheader("🧑‍🤝‍🧑 Orders by Gender")
+    st.bar_chart(gender_df.set_index("GENDER"))
+
+    avg_items_df = run_query("SELECT * FROM consumption_sch.vw_avg_items_per_order")
+    st.metric("🛍️ Avg Items per Order", float(avg_items_df['AVG_ITEMS_PER_ORDER'].iloc[0]))
+
+    agent_df = run_query("SELECT * FROM consumption_sch.vw_revenue_by_delivery_agent")
+    st.subheader("🚚 Revenue by Delivery Agent")
+    st.dataframe(agent_df.style.format({
+        "total_revenue": "₹{:,.0f}"
+    }), use_container_width=True)
